@@ -1,0 +1,9 @@
+[package]
+name = "cfc-ptrace"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nix = { version = "0.30", features = ["process", "ptrace", "signal"] }
+libc = "0.2"
+tempfile = "3.0"
