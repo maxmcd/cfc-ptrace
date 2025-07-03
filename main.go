@@ -3,15 +3,24 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
-	"time"
 )
 
 func main() {
 	fmt.Println("Go program starting...")
 
+	dir, err := os.Getwd()
+	if err != nil {
+		fmt.Printf("Error getting working directory: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Working directory: %s\n", dir)
+
+	firstFakeFile := filepath.Join(dir, "fs", "fake/test.txt")
+	secondFakeFile := filepath.Join(dir, "fs", "another/fake/file.txt")
 	// Test 1: Read initial content of fake file
-	content, err := os.ReadFile("/fake/test.txt")
+	content, err := os.ReadFile(firstFakeFile)
 	if err != nil {
 		fmt.Printf("Error reading file: %v\n", err)
 		os.Exit(1)
@@ -25,7 +34,7 @@ func main() {
 
 	// Test 2: Write new content to fake file
 	newContent := "Modified content from Go!\nWrite operation successful."
-	err = os.WriteFile("/fake/test.txt", []byte(newContent), 0644)
+	err = os.WriteFile(firstFakeFile, []byte(newContent), 0644)
 	if err != nil {
 		fmt.Printf("Error writing file: %v\n", err)
 		os.Exit(1)
@@ -33,7 +42,7 @@ func main() {
 	fmt.Println("✓ Write operation completed")
 
 	// Test 3: Read back the written content to verify
-	content, err = os.ReadFile("/fake/test.txt")
+	content, err = os.ReadFile(firstFakeFile)
 	if err != nil {
 		fmt.Printf("Error reading file after write: %v\n", err)
 		os.Exit(1)
@@ -46,14 +55,14 @@ func main() {
 
 	// Test 4: Test write to second fake file
 	content2 := "Data written to second file!"
-	err = os.WriteFile("/another/fake/file.txt", []byte(content2), 0644)
+	err = os.WriteFile(secondFakeFile, []byte(content2), 0644)
 	if err != nil {
 		fmt.Printf("Error writing second file: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Test 5: Read second file to verify write worked
-	readContent2, err := os.ReadFile("/another/fake/file.txt")
+	readContent2, err := os.ReadFile(secondFakeFile)
 	if err != nil {
 		fmt.Printf("Error reading second file: %v\n", err)
 		os.Exit(1)
@@ -64,7 +73,5 @@ func main() {
 	}
 	fmt.Printf("✓ Second file write/read successful: %s\n", string(readContent2))
 
-	// Small delay to make tracing easier to observe
-	time.Sleep(100 * time.Millisecond)
 	fmt.Println("✓ All tests passed - Go program finished successfully")
 }

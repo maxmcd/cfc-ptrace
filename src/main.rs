@@ -2,11 +2,14 @@ use nix::sys::ptrace;
 use nix::sys::signal::Signal;
 use nix::sys::wait::{wait, WaitStatus};
 use nix::unistd::{fork, ForkResult, Pid};
-use std::collections::HashMap;
 use std::env;
 use std::fmt;
 use std::os::unix::process::CommandExt;
 use std::process::{exit, Command};
+use tokio::runtime::Runtime;
+
+mod websocket_fs;
+use websocket_fs::{FileError, WebSocketFileSystem};
 
 #[derive(Debug)]
 enum PtraceError {
@@ -41,121 +44,6 @@ const SYS_LSEEK: i64 = 8;
 
 const MAX_STRING_LENGTH: usize = 4096;
 const MAX_BUFFER_SIZE: usize = 1024 * 1024; // 1MB
-
-#[derive(Debug, Clone)]
-struct FakeFile {
-    content: Vec<u8>,
-    position: usize,
-    path: String,
-}
-
-struct FakeFileSystem {
-    files: HashMap<String, Vec<u8>>,
-    open_files: HashMap<i32, FakeFile>,
-    next_fd: i32,
-}
-
-impl FakeFileSystem {
-    fn new() -> Self {
-        let mut files = HashMap::new();
-        files.insert(
-            "/fake/test.txt".to_string(),
-            "Hello from fake filesystem!\nThis is intercepted content."
-                .as_bytes()
-                .to_vec(),
-        );
-        files.insert(
-            "/another/fake/file.txt".to_string(),
-            "Another fake file!\nPtrace interception working."
-                .as_bytes()
-                .to_vec(),
-        );
-
-        Self {
-            files,
-            open_files: HashMap::new(),
-            next_fd: 1000, // Start fake fds at 1000
-        }
-    }
-
-    fn open_file(&mut self, path: &str) -> Option<i32> {
-        if let Some(content) = self.files.get(path) {
-            let fd = self.next_fd;
-            self.next_fd += 1;
-
-            self.open_files.insert(
-                fd,
-                FakeFile {
-                    content: content.clone(),
-                    position: 0,
-                    path: path.to_string(),
-                },
-            );
-
-            Some(fd)
-        } else {
-            None
-        }
-    }
-
-    fn read_file(&mut self, fd: i32, count: usize) -> Option<Vec<u8>> {
-        if let Some(fake_file) = self.open_files.get_mut(&fd) {
-            let available = fake_file.content.len().saturating_sub(fake_file.position);
-            let to_read = count.min(available);
-
-            if to_read == 0 {
-                return Some(Vec::new());
-            }
-
-            let data = fake_file.content[fake_file.position..fake_file.position + to_read].to_vec();
-            fake_file.position += to_read;
-            Some(data)
-        } else {
-            None
-        }
-    }
-
-    fn write_file(&mut self, fd: i32, data: &[u8]) -> Option<usize> {
-        if let Some(fake_file) = self.open_files.get_mut(&fd) {
-            // For WriteFile operations, we typically replace the entire content
-            // This matches Go's os.WriteFile behavior which truncates and writes
-            fake_file.content = data.to_vec();
-            fake_file.position = data.len();
-
-            // Update the master file content using the stored path
-            let path = fake_file.path.clone();
-            self.files.insert(path, fake_file.content.clone());
-
-            Some(data.len())
-        } else {
-            None
-        }
-    }
-
-    fn seek_file(&mut self, fd: i32, offset: i64, whence: i32) -> Option<i64> {
-        if let Some(fake_file) = self.open_files.get_mut(&fd) {
-            let new_pos = match whence {
-                0 => offset as usize,                                         // SEEK_SET
-                1 => fake_file.position.saturating_add(offset as usize),      // SEEK_CUR
-                2 => fake_file.content.len().saturating_add(offset as usize), // SEEK_END
-                _ => return None,
-            };
-
-            fake_file.position = new_pos;
-            Some(new_pos as i64)
-        } else {
-            None
-        }
-    }
-
-    fn close_file(&mut self, fd: i32) -> bool {
-        self.open_files.remove(&fd).is_some()
-    }
-
-    fn is_fake_fd(&self, fd: i32) -> bool {
-        self.open_files.contains_key(&fd)
-    }
-}
 
 fn run_child(program: &str, args: &[String]) -> Result<(), PtraceError> {
     ptrace::traceme()
@@ -257,25 +145,24 @@ fn write_data_to_child(pid: Pid, addr: u64, data: &[u8]) -> Result<(), PtraceErr
     Ok(())
 }
 
-fn handle_syscall_entry(
+async fn handle_syscall_entry(
     pid: Pid,
-    fake_fs: &mut FakeFileSystem,
+    fs: &mut WebSocketFileSystem,
 ) -> Result<(bool, Option<String>, usize), PtraceError> {
     let regs = ptrace::getregs(pid)
         .map_err(|e| PtraceError::PtraceOperation(format!("getregs failed: {}", e)))?;
 
     match regs.orig_rax as i64 {
         SYS_OPENAT => {
+            println!("openat: {:?}", regs);
             let pathname_addr = regs.rsi;
 
             match read_string(pid, pathname_addr) {
                 Ok(pathname) => {
                     println!("openat: {}", pathname);
-
-                    if fake_fs.files.contains_key(&pathname) {
-                        println!("  -> will intercept this openat");
-                        return Ok((true, Some(pathname), 0)); // Mark for interception
-                    }
+                    fs.open_file(&pathname).await.map_err(|e| {
+                        PtraceError::PtraceOperation(format!("Failed to open file: {}", e))
+                    })?;
                 }
                 Err(e) => {
                     eprintln!("Failed to read pathname: {}", e);
@@ -283,56 +170,18 @@ fn handle_syscall_entry(
             }
         }
         SYS_READ => {
-            let fd = regs.rdi as i32;
-            if fake_fs.is_fake_fd(fd) {
-                let buf_addr = regs.rsi;
-                let count = regs.rdx as usize;
-                println!("read: fd={}, count={}", fd, count);
-
-                if let Some(data) = fake_fs.read_file(fd, count) {
-                    let bytes_read = data.len();
-                    println!("  -> writing {} bytes to child memory", bytes_read);
-                    match write_data_to_child(pid, buf_addr, &data) {
-                        Ok(_) => return Ok((true, None, bytes_read)), // Mark for interception, store bytes read
-                        Err(e) => eprintln!("Failed to write data to child: {}", e),
-                    }
-                }
-            }
+            println!("read: {:?}", regs);
         }
         SYS_WRITE => {
-            let fd = regs.rdi as i32;
-            if fake_fs.is_fake_fd(fd) {
-                let buf_addr = regs.rsi;
-                let count = regs.rdx as usize;
-                println!("write: fd={}, count={}", fd, count);
-
-                match read_data_from_child(pid, buf_addr, count) {
-                    Ok(data) => {
-                        if let Some(bytes_written) = fake_fs.write_file(fd, &data) {
-                            println!("  -> wrote {} bytes to fake file", bytes_written);
-                            return Ok((true, None, bytes_written)); // Mark for interception
-                        }
-                    }
-                    Err(e) => eprintln!("Failed to read data from child: {}", e),
-                }
-            }
+            println!("write: {:?}", regs);
         }
         SYS_LSEEK => {
-            let fd = regs.rdi as i32;
-            if fake_fs.is_fake_fd(fd) {
-                let offset = regs.rsi as i64;
-                let whence = regs.rdx as i32;
-                println!("lseek: fd={}, offset={}, whence={}", fd, offset, whence);
-
-                if let Some(new_pos) = fake_fs.seek_file(fd, offset, whence) {
-                    println!("  -> new position: {}", new_pos);
-                    return Ok((true, None, new_pos as usize)); // Mark for interception
-                }
-            }
+            println!("lseek: {:?}", regs);
         }
         SYS_CLOSE => {
+            println!("close: {:?}", regs);
             let fd = regs.rdi as i32;
-            if fake_fs.close_file(fd) {
+            if fs.close_file(fd) {
                 println!("close: fake fd={}", fd);
                 return Ok((true, None, 0)); // Mark for interception
             }
@@ -343,9 +192,9 @@ fn handle_syscall_entry(
     Ok((false, None, 0)) // Don't intercept
 }
 
-fn handle_syscall_exit(
+async fn handle_syscall_exit(
     pid: Pid,
-    fake_fs: &mut FakeFileSystem,
+    fs: &mut WebSocketFileSystem,
     should_intercept: bool,
     pathname: Option<String>,
     bytes_read: usize,
@@ -359,13 +208,18 @@ fn handle_syscall_exit(
 
     match regs.orig_rax as i64 {
         SYS_OPENAT => {
+            println!("openat exit: {:?}", regs);
             if let Some(path) = pathname {
-                if let Some(fake_fd) = fake_fs.open_file(&path) {
-                    println!("  -> overriding return value with fake fd: {}", fake_fd);
-                    regs.rax = fake_fd as u64;
-                    ptrace::setregs(pid, regs).map_err(|e| {
-                        PtraceError::PtraceOperation(format!("setregs failed: {}", e))
-                    })?;
+                match fs.open_file(&path).await {
+                    Ok(fake_fd) => {}
+                    Err(e) => {
+                        eprintln!("Failed to open file {}: {}", path, e);
+                        // Return ENOENT (2) to indicate file not found
+                        regs.rax = (-2_i64) as u64;
+                        ptrace::setregs(pid, regs).map_err(|e| {
+                            PtraceError::PtraceOperation(format!("setregs failed: {}", e))
+                        })?;
+                    }
                 }
             }
         }
@@ -398,12 +252,19 @@ fn handle_syscall_exit(
     Ok(())
 }
 
-fn run_parent(pid: Pid) -> Result<(), PtraceError> {
-    let mut fake_fs = FakeFileSystem::new();
+async fn run_parent(pid: Pid) -> Result<(), PtraceError> {
+    let cache_dir = env::var("CACHE_DIR").unwrap_or_else(|_| "/tmp/cfc-cache".to_string());
+    let mut fake_fs = WebSocketFileSystem::new(cache_dir);
     let mut in_syscall = false;
     let mut should_intercept = false;
     let mut pathname: Option<String> = None;
     let mut bytes_read = 0;
+
+    // Start WebSocket server and wait for client
+    println!("Starting WebSocket server...");
+    fake_fs.start_server(8080).await.map_err(|e| {
+        PtraceError::PtraceOperation(format!("Failed to start WebSocket server: {}", e))
+    })?;
 
     wait().map_err(|e| PtraceError::PtraceOperation(format!("initial wait failed: {}", e)))?;
 
@@ -418,7 +279,7 @@ fn run_parent(pid: Pid) -> Result<(), PtraceError> {
             Ok(WaitStatus::Stopped(_, Signal::SIGTRAP)) | Ok(WaitStatus::PtraceSyscall(_)) => {
                 if !in_syscall {
                     // Syscall entry
-                    match handle_syscall_entry(pid, &mut fake_fs) {
+                    match handle_syscall_entry(pid, &mut fake_fs).await {
                         Ok((intercept, path, read_bytes)) => {
                             should_intercept = intercept;
                             pathname = path;
@@ -437,7 +298,9 @@ fn run_parent(pid: Pid) -> Result<(), PtraceError> {
                         should_intercept,
                         pathname.clone(),
                         bytes_read,
-                    ) {
+                    )
+                    .await
+                    {
                         eprintln!("Error handling syscall exit: {}", e);
                     }
                     in_syscall = false;
@@ -493,6 +356,8 @@ fn main() {
     let program = &args[1];
     let program_args = &args[2..];
 
+    let rt = Runtime::new().expect("Failed to create tokio runtime");
+
     match unsafe { fork() } {
         Ok(ForkResult::Child) => {
             if let Err(e) = run_child(program, program_args) {
@@ -501,7 +366,7 @@ fn main() {
             }
         }
         Ok(ForkResult::Parent { child }) => {
-            if let Err(e) = run_parent(child) {
+            if let Err(e) = rt.block_on(run_parent(child)) {
                 eprintln!("Parent process error: {}", e);
                 exit(1);
             }

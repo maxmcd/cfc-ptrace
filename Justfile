@@ -1,6 +1,8 @@
 
 run: compile_go compile_rust
-     ./target/release/cfc-ptrace ./cfc-ptrace.bin
+    mkdir -p ./fs
+    rm -rf ./fs/*
+    ./target/release/cfc-ptrace ./cfc-ptrace.bin
 
 
 compile_go:
