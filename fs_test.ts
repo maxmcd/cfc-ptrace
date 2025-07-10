@@ -1,5 +1,5 @@
 import { assertEquals, assertThrows } from "@std/assert";
-import { newFS } from "./fs.ts";
+import { FileStats, newFS } from "./fs.ts";
 
 Deno.test(function chunkedWriteReadTest() {
   const fs = newFS({ location: ":memory:", chunkSize: 1024 });
@@ -269,4 +269,242 @@ Deno.test(function fileSizeGrowthTest() {
   assertEquals(fs.read("growth.bin", 0, 2), new Uint8Array([1, 2]));
   assertEquals(fs.read("growth.bin", 100, 1), new Uint8Array([50]));
   assertEquals(fs.read("growth.bin", 5000, 1), new Uint8Array([99]));
+});
+
+Deno.test(function statTest() {
+  const fs = newFS({ location: ":memory:", chunkSize: 1024 });
+
+  // Create a file with some data
+  const testData = new Uint8Array([1, 2, 3, 4, 5]);
+  fs.write("stat_test.bin", 0, testData);
+
+  // Get file stats
+  const stats = fs.stat("stat_test.bin");
+
+  // Verify stats structure and values
+  assertEquals(typeof stats.file_id, "number");
+  assertEquals(stats.filename, "stat_test.bin");
+  assertEquals(stats.file_size, 5);
+  assertEquals(typeof stats.created_at, "string");
+  assertEquals(typeof stats.modified_at, "string");
+
+  // Verify timestamps are valid ISO strings
+  const createdDate = new Date(stats.created_at);
+  const modifiedDate = new Date(stats.modified_at);
+  assertEquals(
+    createdDate instanceof Date && !isNaN(createdDate.getTime()),
+    true,
+  );
+  assertEquals(
+    modifiedDate instanceof Date && !isNaN(modifiedDate.getTime()),
+    true,
+  );
+
+  // Test stat on non-existent file
+  assertThrows(
+    () => {
+      fs.stat("nonexistent.bin");
+    },
+    Error,
+    "File not found",
+  );
+});
+
+Deno.test(function truncateTest() {
+  const fs = newFS({ location: ":memory:", chunkSize: 1024 });
+
+  // Create a file with data spanning multiple chunks
+  const largeData = new Uint8Array(3000);
+  for (let i = 0; i < largeData.length; i++) {
+    largeData[i] = i % 256;
+  }
+  fs.write("truncate_test.bin", 0, largeData);
+
+  // Verify initial size
+  assertEquals(fs.stat("truncate_test.bin").file_size, 3000);
+
+  // Truncate to smaller size within same chunk
+  fs.truncate("truncate_test.bin", 100);
+  assertEquals(fs.stat("truncate_test.bin").file_size, 100);
+
+  // Verify data integrity after truncation
+  const truncatedData = fs.read("truncate_test.bin", 0, 100);
+  assertEquals(truncatedData, largeData.slice(0, 100));
+
+  // Truncate to size crossing chunk boundary
+  fs.write("truncate_test.bin", 0, largeData); // Restore original data
+  fs.truncate("truncate_test.bin", 1500);
+  assertEquals(fs.stat("truncate_test.bin").file_size, 1500);
+
+  const truncatedData2 = fs.read("truncate_test.bin", 0, 1500);
+  assertEquals(truncatedData2, largeData.slice(0, 1500));
+
+  // Truncate to size 0
+  fs.truncate("truncate_test.bin", 0);
+  assertEquals(fs.stat("truncate_test.bin").file_size, 0);
+
+  // Truncate to larger size (should just update metadata)
+  fs.truncate("truncate_test.bin", 2000);
+  assertEquals(fs.stat("truncate_test.bin").file_size, 2000);
+
+  // Test truncate on non-existent file
+  assertThrows(
+    () => {
+      fs.truncate("nonexistent.bin", 100);
+    },
+    Error,
+    "File not found",
+  );
+});
+
+Deno.test(function unlinkTest() {
+  const fs = newFS({ location: ":memory:", chunkSize: 1024 });
+
+  // Create multiple files
+  fs.write("file1.bin", 0, new Uint8Array([1, 1, 1]));
+  fs.write("file2.bin", 0, new Uint8Array([2, 2, 2]));
+  fs.write("file3.bin", 0, new Uint8Array([3, 3, 3]));
+
+  // Verify all files exist
+  assertEquals(fs.stat("file1.bin").filename, "file1.bin");
+  assertEquals(fs.stat("file2.bin").filename, "file2.bin");
+  assertEquals(fs.stat("file3.bin").filename, "file3.bin");
+
+  // Delete one file
+  fs.unlink("file2.bin");
+
+  // Verify deleted file is gone
+  assertThrows(
+    () => {
+      fs.stat("file2.bin");
+    },
+    Error,
+    "File not found",
+  );
+
+  assertThrows(
+    () => {
+      fs.read("file2.bin", 0, 1);
+    },
+    Error,
+    "File not found",
+  );
+
+  // Verify other files are still accessible
+  assertEquals(fs.read("file1.bin", 0, 3), new Uint8Array([1, 1, 1]));
+  assertEquals(fs.read("file3.bin", 0, 3), new Uint8Array([3, 3, 3]));
+
+  // Test unlink on non-existent file
+  assertThrows(
+    () => {
+      fs.unlink("nonexistent.bin");
+    },
+    Error,
+    "File not found",
+  );
+});
+
+Deno.test(function renameTest() {
+  const fs = newFS({ location: ":memory:", chunkSize: 1024 });
+
+  // Create a file with some data
+  const testData = new Uint8Array([10, 20, 30, 40, 50]);
+  fs.write("original_name.bin", 0, testData);
+
+  // Verify original file exists
+  assertEquals(fs.stat("original_name.bin").filename, "original_name.bin");
+  assertEquals(fs.read("original_name.bin", 0, 5), testData);
+
+  // Rename the file
+  fs.rename("original_name.bin", "new_name.bin");
+
+  // Verify old name is gone
+  assertThrows(
+    () => {
+      fs.stat("original_name.bin");
+    },
+    Error,
+    "File not found",
+  );
+
+  assertThrows(
+    () => {
+      fs.read("original_name.bin", 0, 1);
+    },
+    Error,
+    "File not found",
+  );
+
+  // Verify new name exists with same data
+  assertEquals(fs.stat("new_name.bin").filename, "new_name.bin");
+  assertEquals(fs.read("new_name.bin", 0, 5), testData);
+
+  // Test rename to existing file (should fail)
+  fs.write("another_file.bin", 0, new Uint8Array([99]));
+  assertThrows(
+    () => {
+      fs.rename("new_name.bin", "another_file.bin");
+    },
+    Error,
+    "Destination file already exists",
+  );
+
+  // Test rename non-existent file
+  assertThrows(
+    () => {
+      fs.rename("nonexistent.bin", "some_name.bin");
+    },
+    Error,
+    "File not found",
+  );
+});
+
+Deno.test(function syscallIntegrationTest() {
+  const fs = newFS({ location: ":memory:", chunkSize: 1024 });
+
+  // Create a file, modify it, and test all operations together
+  const initialData = new Uint8Array(2048);
+  for (let i = 0; i < initialData.length; i++) {
+    initialData[i] = i % 256;
+  }
+
+  // Write initial data
+  fs.write("integration_test.bin", 0, initialData);
+
+  // Check stats
+  let stats = fs.stat("integration_test.bin");
+  assertEquals(stats.file_size, 2048);
+
+  // Truncate file
+  fs.truncate("integration_test.bin", 1000);
+  stats = fs.stat("integration_test.bin");
+  assertEquals(stats.file_size, 1000);
+
+  // Verify truncated data is correct
+  const truncatedData = fs.read("integration_test.bin", 0, 1000);
+  assertEquals(truncatedData, initialData.slice(0, 1000));
+
+  // Rename file
+  fs.rename("integration_test.bin", "renamed_test.bin");
+
+  // Verify new name works
+  stats = fs.stat("renamed_test.bin");
+  assertEquals(stats.filename, "renamed_test.bin");
+  assertEquals(stats.file_size, 1000);
+
+  // Verify data is still correct
+  const renamedData = fs.read("renamed_test.bin", 0, 1000);
+  assertEquals(renamedData, initialData.slice(0, 1000));
+
+  // Finally, delete the file
+  fs.unlink("renamed_test.bin");
+
+  // Verify file is completely gone
+  assertThrows(
+    () => {
+      fs.stat("renamed_test.bin");
+    },
+    Error,
+    "File not found",
+  );
 });

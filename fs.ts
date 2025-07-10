@@ -2,6 +2,14 @@ import { DatabaseSync } from "node:sqlite";
 
 const CHUNK_SIZE = 512 * 1024;
 
+export interface FileStats {
+  file_id: number;
+  filename: string;
+  file_size: number;
+  created_at: string;
+  modified_at: string;
+}
+
 export function newFS(options?: { location?: string; chunkSize?: number }) {
   const database = new DatabaseSync(options?.location || "fs.db");
   database.exec(`
@@ -164,5 +172,111 @@ class FS {
     }
 
     return result;
+  }
+
+  stat(path: string): FileStats {
+    const fileInfo = this.database.prepare(
+      "SELECT file_id, filename, file_size, created_at, modified_at FROM files WHERE filename = ?",
+    ).get(path) as FileStats | undefined;
+
+    if (!fileInfo) {
+      throw new Error("File not found");
+    }
+
+    return fileInfo;
+  }
+
+  truncate(path: string, size: number): void {
+    const fileId = this.database.prepare(
+      "SELECT file_id FROM files WHERE filename = ?",
+    ).get(path) as { file_id: number } | undefined;
+
+    if (!fileId) {
+      throw new Error("File not found");
+    }
+
+    // If truncating to a smaller size, remove chunks beyond the new size
+    const lastNeededChunk = Math.floor((size - 1) / this.chunkSize);
+    this.database.prepare(
+      "DELETE FROM file_chunks WHERE file_id = ? AND chunk_index > ?",
+    ).run(fileId.file_id, lastNeededChunk);
+
+    // If the last chunk needs partial truncation, handle it
+    if (size > 0) {
+      const lastChunkOffset = size % this.chunkSize;
+      if (lastChunkOffset > 0) {
+        const lastChunk = this.database.prepare(
+          "SELECT chunk_data FROM file_chunks WHERE file_id = ? AND chunk_index = ?",
+        ).get(fileId.file_id, lastNeededChunk) as
+          | { chunk_data: Uint8Array }
+          | undefined;
+
+        if (lastChunk) {
+          const truncatedChunk = lastChunk.chunk_data.slice(0, lastChunkOffset);
+          this.database.prepare(
+            "UPDATE file_chunks SET chunk_data = ?, chunk_size = ? WHERE file_id = ? AND chunk_index = ?",
+          ).run(
+            truncatedChunk,
+            truncatedChunk.length,
+            fileId.file_id,
+            lastNeededChunk,
+          );
+        }
+      }
+    } else {
+      // Truncating to size 0 - remove all chunks
+      this.database.prepare(
+        "DELETE FROM file_chunks WHERE file_id = ?",
+      ).run(fileId.file_id);
+    }
+
+    // Update file size and modified timestamp
+    this.database.prepare(
+      "UPDATE files SET file_size = ?, modified_at = ? WHERE file_id = ?",
+    ).run(size, new Date().toISOString(), fileId.file_id);
+  }
+
+  unlink(path: string): void {
+    const fileId = this.database.prepare(
+      "SELECT file_id FROM files WHERE filename = ?",
+    ).get(path) as { file_id: number } | undefined;
+
+    if (!fileId) {
+      throw new Error("File not found");
+    }
+
+    // Remove all chunks for this file
+    this.database.prepare(
+      "DELETE FROM file_chunks WHERE file_id = ?",
+    ).run(fileId.file_id);
+
+    // Remove the file record
+    this.database.prepare(
+      "DELETE FROM files WHERE file_id = ?",
+    ).run(fileId.file_id);
+  }
+
+  rename(oldPath: string, newPath: string): void {
+    const fileId = this.database.prepare(
+      "SELECT file_id FROM files WHERE filename = ?",
+    ).get(oldPath) as { file_id: number } | undefined;
+
+    if (!fileId) {
+      throw new Error("File not found");
+    }
+
+    // Check if destination already exists
+    const existingFile = this.database.prepare(
+      "SELECT file_id FROM files WHERE filename = ?",
+    ).get(newPath) as { file_id: number } | undefined;
+
+    if (existingFile) {
+      throw new Error("Destination file already exists");
+    }
+
+    // Update the filename
+    this.database.prepare(
+      "UPDATE files SET filename = ?, modified_at = ? WHERE file_id = ?",
+    ).run(newPath, new Date().toISOString(), fileId.file_id);
   }
 }
