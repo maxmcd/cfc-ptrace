@@ -30,7 +30,11 @@ interface Response {
 
 class WebSocketFilesystemClient {
   private ws: WebSocket | null = null;
-  private fs = newFS();
+  private fs: ReturnType<typeof newFS>;
+
+  constructor(options?: { location?: string; chunkSize?: number }) {
+    this.fs = newFS(options);
+  }
 
   connect(url: string): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -93,8 +97,8 @@ class WebSocketFilesystemClient {
         case "read": {
           const result = this.fs.read(
             request.path,
-            request.size,
             request.offset,
+            request.size,
           );
           return {
             fs: {
@@ -166,18 +170,36 @@ class WebSocketFilesystemClient {
     this.ws.send(message.buffer);
   }
 
-  async start(): Promise<void> {
-    await this.connect("ws://127.0.0.1:8080");
+  async start(port: number = 8080): Promise<void> {
+    await this.connect(`ws://127.0.0.1:${port}`);
   }
 }
 
 // Main execution
 if (import.meta.main) {
-  const client = new WebSocketFilesystemClient();
+  // Parse command line arguments
+  const args = Deno.args;
+  let useInMemory = false;
+  let port = 8080;
+  
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--memory") {
+      useInMemory = true;
+    } else if (args[i] === "--port" && i + 1 < args.length) {
+      port = parseInt(args[i + 1]);
+      i++; // Skip the next argument as it's the port number
+    }
+  }
+
+  const fsOptions = useInMemory ? { location: ":memory:" } : undefined;
+  const client = new WebSocketFilesystemClient(fsOptions);
 
   console.log("Starting filesystem client...");
+  console.log(`Using ${useInMemory ? "in-memory" : "persistent"} SQLite database`);
+  console.log(`Connecting to WebSocket server on port ${port}`);
+  
   try {
-    await client.start();
+    await client.start(port);
     console.log("Filesystem client running and waiting for requests...");
 
     // Keep the process alive

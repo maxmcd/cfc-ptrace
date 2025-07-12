@@ -215,7 +215,7 @@ impl WebSocketFileSystem {
         Ok(())
     }
 
-    async fn send_request(
+    pub async fn send_request(
         &self,
         request: FSRequest,
     ) -> Result<FSResponseWithBinary, Box<dyn std::error::Error>> {
@@ -250,7 +250,7 @@ impl WebSocketFileSystem {
         Ok(response)
     }
 
-    async fn send_request_with_binary(
+    pub async fn send_request_with_binary(
         &self,
         request: FSRequest,
         data: &[u8],

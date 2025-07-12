@@ -9,7 +9,10 @@ use std::process::{exit, Command};
 use tokio::runtime::Runtime;
 
 mod websocket_fs;
-use websocket_fs::{FileError, WebSocketFileSystem};
+#[cfg(test)]
+mod websocket_fs_tests;
+
+use websocket_fs::WebSocketFileSystem;
 
 #[derive(Debug)]
 enum PtraceError {
@@ -250,7 +253,7 @@ async fn handle_syscall_exit(
     Ok(())
 }
 
-async fn run_parent(pid: Pid) -> Result<(), PtraceError> {
+async fn run_parent(pid: Pid) -> Result<i32, PtraceError> {
     let cache_dir = env::var("CACHE_DIR").unwrap_or_else(|_| "/tmp/cfc-cache".to_string());
     let mut fake_fs = WebSocketFileSystem::new(cache_dir);
     let mut in_syscall = false;
@@ -285,7 +288,7 @@ async fn run_parent(pid: Pid) -> Result<(), PtraceError> {
                             in_syscall = true;
                         }
                         Err(e) => {
-                            eprintln!("Error handling syscall entry: {}", e);
+                            println!("Error handling syscall entry: {}", e);
                         }
                     }
                 } else {
@@ -299,7 +302,7 @@ async fn run_parent(pid: Pid) -> Result<(), PtraceError> {
                     )
                     .await
                     {
-                        eprintln!("Error handling syscall exit: {}", e);
+                        println!("Error handling syscall exit: {}", e);
                     }
                     in_syscall = false;
                     should_intercept = false;
@@ -321,11 +324,11 @@ async fn run_parent(pid: Pid) -> Result<(), PtraceError> {
             }
             Ok(WaitStatus::Exited(_, exit_status)) => {
                 println!("Process exited with status {}", exit_status);
-                break;
+                return Ok(exit_status);
             }
             Ok(WaitStatus::Signaled(_, signal, _)) => {
                 println!("Process killed by signal {:?}", signal);
-                break;
+                return Ok(128 + signal as i32);  // Standard convention for signal termination
             }
             Ok(status) => {
                 println!("Other status: {:?}", status);
@@ -335,12 +338,12 @@ async fn run_parent(pid: Pid) -> Result<(), PtraceError> {
             }
             Err(err) => {
                 eprintln!("Wait error: {}", err);
-                break;
+                return Ok(1);  // Return error exit code
             }
         }
     }
 
-    Ok(())
+    Ok(0)  // Should not reach here, but return success if we do
 }
 
 fn main() {
@@ -364,9 +367,14 @@ fn main() {
             }
         }
         Ok(ForkResult::Parent { child }) => {
-            if let Err(e) = rt.block_on(run_parent(child)) {
-                eprintln!("Parent process error: {}", e);
-                exit(1);
+            match rt.block_on(run_parent(child)) {
+                Ok(exit_code) => {
+                    exit(exit_code);
+                }
+                Err(e) => {
+                    eprintln!("Parent process error: {}", e);
+                    exit(1);
+                }
             }
         }
         Err(err) => {

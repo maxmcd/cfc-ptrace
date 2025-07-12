@@ -1,54 +1,46 @@
-A (wip) ptrace virtual filesystem backed by cloudflare d1 on durable objects.
+# CFC-Ptrace
 
-Run with `just`:
+A ptrace-based virtual filesystem that intercepts filesystem syscalls and redirects them to a WebSocket-backed filesystem. Originally designed for Cloudflare D1/Durable Objects integration.
 
-```
-go build -o cfc-ptrace.bin .
+## How It Works
+
+This program uses Linux ptrace to watch any executable and intercept its filesystem operations. When the program tries to access files, those operations get redirected to a custom WebSocket filesystem instead of the real filesystem. The virtual filesystem stores data in a SQLite database.
+
+## Usage
+
+```bash
+# Build the Rust tracer
 cargo build --release
-    Finished `release` profile [optimized] target(s) in 0.02s
+
+# Run any executable under the virtual filesystem
+./target/release/cfc-ptrace <executable> [args...]
+```
+
+## Example with Go Test Program
+
+The repository includes a simple Go test program that demonstrates the virtual filesystem:
+
+```bash
+# Build the test program
+go build -o cfc-ptrace.bin .
+
+# Run under the virtual filesystem
 ./target/release/cfc-ptrace ./cfc-ptrace.bin
-openat: /sys/kernel/mm/transparent_hugepage/hpage_pmd_size
+```
+
+Example output:
+```
+Starting WebSocket server...
 Go program starting...
-openat: /fake/test.txt
-  -> will intercept this openat
-  -> overriding return value with fake fd: 1000
-read: fd=1000, count=512
-  -> writing 56 bytes to child memory
-read: fd=1000, count=456
-  -> writing 0 bytes to child memory
-close: fake fd=1000
-✓ Initial read successful: Hello from fake filesystem!\nThis is intercepted content.
-openat: /fake/test.txt
-  -> will intercept this openat
-  -> overriding return value with fake fd: 1001
-write: fd=1001, count=53
-  -> wrote 53 bytes to fake file
-close: fake fd=1001
-✓ Write operation completed
-openat: /fake/test.txt
-  -> will intercept this openat
-  -> overriding return value with fake fd: 1002
-read: fd=1002, count=512
-  -> writing 53 bytes to child memory
-read: fd=1002, count=459
-  -> writing 0 bytes to child memory
-close: fake fd=1002
-✓ Content verified after write: Modified content from Go!\nWrite operation successful.
-openat: /another/fake/file.txt
-  -> will intercept this openat
-  -> overriding return value with fake fd: 1003
-write: fd=1003, count=28
-  -> wrote 28 bytes to fake file
-close: fake fd=1003
-openat: /another/fake/file.txt
-  -> will intercept this openat
-  -> overriding return value with fake fd: 1004
-read: fd=1004, count=512
-  -> writing 28 bytes to child memory
-read: fd=1004, count=484
-  -> writing 0 bytes to child memory
-close: fake fd=1004
-✓ Second file write/read successful: Data written to second file!
+Working directory: /home/maxm/go/src/github.com/maxmcd/cfc-ptrace
+openat: /home/maxm/go/src/github.com/maxmcd/cfc-ptrace/fs/test.txt
+write: 0x7ffd12345678
+read: 0x7ffd12345678
+close: 1000
 ✓ All tests passed - Go program finished successfully
 Process exited with status 0
 ```
+
+## Architecture
+
+The Rust program forks into two processes. The parent process uses ptrace to monitor the child process. When the child makes filesystem syscalls, the parent handles them through a WebSocket server that communicates with a SQLite-backed filesystem. This allows programs to run normally while their file operations are redirected to a virtual filesystem that can be hosted remotely or backed by cloud storage.
