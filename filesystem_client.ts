@@ -1,3 +1,5 @@
+import { newFS } from "./fs.ts";
+
 type FSRequest = {
   id: string;
   operation: "read";
@@ -26,65 +28,9 @@ interface Response {
   data?: Uint8Array;
 }
 
-class InMemoryFileSystem {
-  private files = new Map<string, Uint8Array>();
-
-  constructor() {
-    const cwd = Deno.cwd();
-    // Pre-populate with test files
-    this.files.set(
-      `${cwd}/fs/fake/test.txt`,
-      new TextEncoder().encode(
-        "Hello from fake filesystem!\nThis is intercepted content.",
-      ),
-    );
-    this.files.set(
-      `${cwd}/fs/another/fake/file.txt`,
-      new TextEncoder().encode(
-        "Another fake file!\nPtrace interception working.",
-      ),
-    );
-  }
-
-  readFile(
-    path: string,
-    size: number,
-    offset: number,
-  ): { data: Uint8Array; bytesRead: number } {
-    const content = this.files.get(path);
-    if (!content) {
-      throw new Error(`File ${path} not found`);
-    }
-
-    const available = content.length - offset;
-    const toRead = Math.min(size, available);
-
-    if (toRead === 0) {
-      return { data: new Uint8Array(0), bytesRead: 0 };
-    }
-
-    const data = content.slice(offset, offset + toRead);
-
-    return { data, bytesRead: toRead };
-  }
-
-  writeFile(
-    path: string,
-    offset: number,
-    data: Uint8Array | undefined,
-  ): number {
-    const file = this.files.get(path);
-    if (!file) {
-      throw new Error(`File ${path} not found`);
-    }
-    file.set(data ?? new Uint8Array(0), offset);
-    return data?.length ?? 0;
-  }
-}
-
 class WebSocketFilesystemClient {
   private ws: WebSocket | null = null;
-  private fs = new InMemoryFileSystem();
+  private fs = newFS();
 
   connect(url: string): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -145,7 +91,7 @@ class WebSocketFilesystemClient {
     try {
       switch (request.operation) {
         case "read": {
-          const result = this.fs.readFile(
+          const result = this.fs.read(
             request.path,
             request.size,
             request.offset,
@@ -154,22 +100,22 @@ class WebSocketFilesystemClient {
             fs: {
               id: request.id,
               success: true,
-              bytes_read: result.bytesRead,
+              bytes_read: result.length,
             },
-            data: result.data,
+            data: result,
           };
         }
         case "write": {
-          const bytesWritten = this.fs.writeFile(
+          this.fs.write(
             request.path,
             request.offset,
-            binaryData,
+            binaryData!,
           );
           return {
             fs: {
               id: request.id,
               success: true,
-              bytes_written: bytesWritten,
+              bytes_written: binaryData!.length,
             },
           };
         }

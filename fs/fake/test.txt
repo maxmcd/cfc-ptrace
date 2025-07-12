@@ -1,2 +1,0 @@
-Modified content from Go!
-Write operation successful.

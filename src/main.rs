@@ -154,9 +154,7 @@ async fn handle_syscall_entry(
 
     match regs.orig_rax as i64 {
         SYS_OPENAT => {
-            println!("openat: {:?}", regs);
             let pathname_addr = regs.rsi;
-
             match read_string(pid, pathname_addr) {
                 Ok(pathname) => {
                     println!("openat: {}", pathname);
@@ -170,16 +168,16 @@ async fn handle_syscall_entry(
             }
         }
         SYS_READ => {
-            println!("read: {:?}", regs);
+            println!("read: {:?}", regs.rsi);
         }
         SYS_WRITE => {
-            println!("write: {:?}", regs);
+            println!("write: {:?}", regs.rsi);
         }
         SYS_LSEEK => {
-            println!("lseek: {:?}", regs);
+            println!("lseek: {:?}", regs.rsi);
         }
         SYS_CLOSE => {
-            println!("close: {:?}", regs);
+            println!("close: {:?}", regs.rsi);
             let fd = regs.rdi as i32;
             if fs.close_file(fd) {
                 println!("close: fake fd={}", fd);
